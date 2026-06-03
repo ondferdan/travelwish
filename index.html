@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>🗺️ Travel Wishlist</title>
+  <!-- PWA -->
+  <meta name="theme-color" content="#1A2B20">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Travel Wishlist">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png"><rect width='100' height='100' rx='22' fill='%231A2B20'/><text y='78' x='12' font-size='72'>🗺️</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Inter:wght@300;400;500;600&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+    html,body,#root{height:100%}
+    body{background:#F2EDE6;font-family:'Inter',system-ui,sans-serif}
+    input,select,textarea,button{font-family:'Inter',system-ui,sans-serif}
+    ::-webkit-scrollbar{width:4px;height:4px}
+    ::-webkit-scrollbar-thumb{background:#C8B89A;border-radius:4px}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+    @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+    .card-hover{transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s ease}
+    .card-hover:hover{transform:translateY(-6px) scale(1.01);box-shadow:0 20px 48px rgba(0,0,0,.18)!important}
+    .fade-in{animation:fadeUp .35s ease both}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback}=React;
+
+// ── Storage ──────────────────────────────────────────────────────────────────
+// ── IndexedDB storage via localforage ────────────────────────────────────────
+localforage.config({name:'TravelWishlist',storeName:'places',version:1});
+
+async function dbLoad(){
+  try{ return await localforage.getItem('twl_v1') || []; }
+  catch(e){ console.error('[DB] Load failed',e); return []; }
+}
+
+async function dbSave(places){
+  try{
+    await localforage.setItem('twl_v1', places);
+    showToast('✓ Uloženo');
+    return true;
+  }catch(e){
+    console.error('[DB] Save failed',e);
+    showToast('⚠️ Uložení selhalo: '+e.message, true);
+    return false;
+  }
+}
+
+function showToast(msg, isError=false){
+  const old=document.getElementById('twl-toast');
+  if(old) old.remove();
+  const t=document.createElement('div');
+  t.id='twl-toast';
+  t.style.cssText=`position:fixed;bottom:90px;left:50%;transform:translateX(-50%);z-index:9998;
+    background:${isError?'#7A2010':'#1A2B20'};color:white;border-radius:20px;padding:10px 20px;
+    font-size:13px;font-family:Inter,sans-serif;white-space:nowrap;
+    box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;
+    animation:fadeUp .25s ease;font-weight:500`;
+  t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>{if(t.parentNode)t.remove();}, isError?4000:2000);
+}
+
+// Compress photo to JPEG max 600px, ~60KB
+async function compressPhoto(dataUrl){
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      const MAX=600;
+      let w=img.width,h=img.height;
+      if(w>h){if(w>MAX){h=Math.round(h*MAX/w);w=MAX;}}
+      else{if(h>MAX){w=Math.round(w*MAX/h);h=MAX;}}
+      const c=document.createElement('canvas');
+      c.width=w;c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      const compressed=c.toDataURL('image/jpeg',0.65);
+      console.log('[Photo] Compressed:',Math.round(dataUrl.length/1024),'KB →',Math.round(compressed.length/1024),'KB');
+      resolve(compressed);
+    };
+    img.onerror=()=>resolve(dataUrl); // fallback: keep original
+    img.src=dataUrl;
+  });
+}
+
+// ── Data ─────────────────────────────────────────────────────────────────────
+const CATS=[
+  {id:'restaurant',label:'Restaurace',emoji:'🍽️',color:'#8B3A2A'},
+  {id:'cafe',      label:'Kavárna',   emoji:'☕',color:'#6B4226'},
+  {id:'hotel',     label:'Ubytování', emoji:'🏨',color:'#1C3A5C'},
+  {id:'nature',    label:'Příroda',   emoji:'🌿',color:'#1C4A2C'},
+  {id:'city',      label:'Destinace', emoji:'🏙️',color:'#2C2C4A'},
+  {id:'activity',  label:'Aktivita',  emoji:'🎯',color:'#3A1C5C'},
+  {id:'bar',       label:'Bar',       emoji:'🍸',color:'#4A1C3A'},
+  {id:'museum',    label:'Kultura',   emoji:'🏛️',color:'#3A2C1C'},
+  {id:'beach',     label:'Pláž',      emoji:'🏖️',color:'#1C4A5C'},
+  {id:'other',     label:'Jiné',      emoji:'✨',color:'#3A3A3A'},
+];
+const STYLES=[
+  {id:'solo',   label:'Sám/sama',  emoji:'🚶'},
+  {id:'couple', label:'Ve dvou',   emoji:'💑'},
+  {id:'friends',label:'S přáteli', emoji:'👥'},
+  {id:'kids',   label:'S dětmi',   emoji:'👨‍👩‍👧'},
+  {id:'group',  label:'Skupina',   emoji:'🎉'},
+];
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const C={
+  bg:'#F2EDE6',
+  surface:'#FFFFFF',
+  header:'#1A2B20',
+  headerLight:'#243D2A',
+  gold:'#C8862A',
+  goldLight:'#E8A84A',
+  forest:'#2A4A38',
+  text:'#1A1510',
+  muted:'#8A7D72',
+  warm:'#6B5E52',
+  sand:'#EDE6DA',
+  border:'#DDD5C8',
+  serif:"'Cormorant Garamond',Georgia,serif",
+  sans:"'Inter',system-ui,sans-serif",
+};
+
+// ── Geocoding ─────────────────────────────────────────────────────────────────
+async function geocode(q){
+  if(!q?.trim())return null;
+  try{
+    const r=await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1`);
+    const d=await r.json();
+    if(d[0])return{lat:parseFloat(d[0].lat),lng:parseFloat(d[0].lon)};
+  }catch{}
+  return null;
+}
+
+// ── Claude API ────────────────────────────────────────────────────────────────
+const JSCHEMA=`Return ONLY raw JSON (no markdown):
+{"name":"place name or null","location":"City, Country","lat":number_or_null,"lng":number_or_null,
+"category":"restaurant"|"cafe"|"hotel"|"nature"|"city"|"activity"|"bar"|"museum"|"beach"|"other",
+"description":"1-2 sentences","tags":["up","to","5"]}`;
+
+function getJSON(txt){const m=txt.match(/\{[\s\S]*\}/);if(!m)throw new Error('no json');return JSON.parse(m[0]);}
+
+async function aiCall(body,key){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-4-5',max_tokens:1000,...body}),
+  });
+  const d=await r.json();if(d.error)throw new Error(d.error.message);return d;
+}
+async function aiImg(b64,mime,key){
+  const d=await aiCall({messages:[{role:'user',content:[
+    {type:'image',source:{type:'base64',media_type:mime,data:b64}},
+    {type:'text',text:`Analyze this travel image, identify the place.\n${JSCHEMA}`},
+  ]}]},key);
+  return getJSON((d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(''));
+}
+async function aiUrl(url,key){
+  const d=await aiCall({tools:[{type:'web_search_20250305',name:'web_search'}],
+    messages:[{role:'user',content:`Travel wishlist entry for: ${url}\nSearch & return:\n${JSCHEMA}`}]},key);
+  return getJSON((d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(''));
+}
+
+// ── Stars ─────────────────────────────────────────────────────────────────────
+const Stars=({value=0,onChange,size=18,color=C.gold})=>(
+  <div style={{display:'flex',gap:1}}>
+    {[1,2,3,4,5].map(n=>(
+      <span key={n} onClick={()=>onChange?.(n)} style={{fontSize:size,color:n<=value?color:'#C8B89A',
+        cursor:onChange?'pointer':'default',lineHeight:1,userSelect:'none',transition:'color .15s'}}>★</span>
+    ))}
+  </div>
+);
+
+// ── Label ─────────────────────────────────────────────────────────────────────
+const Label=({children})=>(
+  <div style={{fontSize:11,fontWeight:600,color:C.muted,letterSpacing:'0.08em',textTransform:'uppercase',marginBottom:8}}>{children}</div>
+);
+
+// ── Styled Input ──────────────────────────────────────────────────────────────
+const SI=({label,suffix,...p})=>(
+  <div>
+    {label&&<Label>{label}</Label>}
+    <div style={{position:'relative'}}>
+      <input {...p} style={{width:'100%',background:C.surface,border:`1.5px solid ${C.border}`,borderRadius:14,
+        padding:suffix?'12px 40px 12px 16px':'12px 16px',fontSize:14,color:C.text,outline:'none',
+        transition:'border-color .2s',boxSizing:'border-box',...p.style}}
+        onFocus={e=>{e.target.style.borderColor=C.gold;p.onFocus?.(e)}}
+        onBlur={e=>{e.target.style.borderColor=C.border;p.onBlur?.(e)}}/>
+      {suffix&&<span style={{position:'absolute',right:14,top:'50%',transform:'translateY(-50%)',fontSize:16,pointerEvents:'none'}}>{suffix}</span>}
+    </div>
+  </div>
+);
+
+// ── Map ───────────────────────────────────────────────────────────────────────
+function MapView({places,onSelect}){
+  const ref=useRef(null),map=useRef(null),mks=useRef([]);
+  const [ok,setOk]=useState(!!window.L);
+  useEffect(()=>{
+    if(window.L){setOk(true);return}
+    const s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    s.onload=()=>setOk(true);document.head.appendChild(s);
+  },[]);
+  useEffect(()=>{
+    if(!ok||!ref.current)return;
+    const L=window.L;
+    if(!map.current){
+      map.current=L.map(ref.current).setView([48,15],4);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(map.current);
+    }
+    mks.current.forEach(m=>m.remove());mks.current=[];
+    const pinned=places.filter(p=>p.lat&&p.lng);
+    pinned.forEach(place=>{
+      const cat=CATS.find(c=>c.id===place.category);
+      const ico=L.divIcon({html:`<div style="background:${cat?.color||'#333'};border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.35);border:2.5px solid white">${cat?.emoji||'📍'}</div>`,className:'',iconSize:[36,36],iconAnchor:[18,18]});
+      const m=L.marker([place.lat,place.lng],{icon:ico}).addTo(map.current)
+        .bindPopup(`<div style="font-family:Inter,sans-serif;min-width:160px;padding:2px 0"><strong style="font-size:14px;color:#1A1510">${place.name}</strong><br><span style="color:#8A7D72;font-size:12px">📍 ${place.location||''}</span></div>`);
+      m.on('click',()=>onSelect(place));mks.current.push(m);
+    });
+    if(pinned.length>0){try{map.current.fitBounds(L.featureGroup(mks.current).getBounds().pad(0.3))}catch{}}
+  },[ok,places]);
+  useEffect(()=>()=>{if(map.current){map.current.remove();map.current=null}},[]);
+  return(
+    <div style={{borderRadius:24,overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,.12)',border:`1px solid ${C.border}`}}>
+      {!ok&&<div style={{height:520,display:'flex',alignItems:'center',justifyContent:'center',background:C.sand,color:C.muted,fontSize:14}}>Načítám mapu…</div>}
+      <div ref={ref} style={{height:520,display:ok?'block':'none'}}/>
+      {places.filter(p=>!p.lat).length>0&&(
+        <div style={{padding:'10px 18px',background:'#FFF8EC',borderTop:`1px solid ${C.border}`,fontSize:12,color:'#A07030',textAlign:'center'}}>
+          ⚠️ {places.filter(p=>!p.lat).length} míst nemá souřadnice — nezobrazují se
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Card ──────────────────────────────────────────────────────────────────────
+function Card({place,onSelect}){
+  const cat=CATS.find(c=>c.id===place.category);
+  const visited=place.status==='visited';
+  return(
+    <div className="card-hover fade-in" onClick={()=>onSelect(place)} style={{
+      cursor:'pointer',borderRadius:20,overflow:'hidden',
+      boxShadow:'0 4px 20px rgba(0,0,0,.10)',background:C.surface,
+    }}>
+      {/* Photo / Thumb */}
+      <div style={{position:'relative',height:220,background:cat?.color||'#2A3A30',overflow:'hidden'}}>
+        {place.photo&&place.photo!=='__photo_removed__'
+          ?<img src={place.photo} alt={place.name} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+          :<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',
+            background:`linear-gradient(135deg,${cat?.color||'#1A2B20'}CC,${cat?.color||'#1A2B20'})`}}>
+            <span style={{fontSize:64,filter:'drop-shadow(0 4px 12px rgba(0,0,0,.4))'}}>{cat?.emoji||'📍'}</span>
+          </div>}
+        {/* gradient overlay */}
+        <div style={{position:'absolute',inset:0,background:'linear-gradient(to top, rgba(0,0,0,.72) 0%, rgba(0,0,0,.0) 55%)'}}/>
+        {/* Status badge */}
+        <div style={{position:'absolute',top:12,right:12,
+          background:visited?'rgba(42,74,56,.92)':'rgba(255,255,255,.15)',
+          backdropFilter:'blur(8px)',WebkitBackdropFilter:'blur(8px)',
+          border:visited?'1px solid rgba(255,255,255,.2)':'1px solid rgba(255,255,255,.3)',
+          color:'white',padding:'4px 11px',borderRadius:20,fontSize:11,fontWeight:600,letterSpacing:'0.04em'}}>
+          {visited?'✓ navštíveno':'♥ wishlist'}
+        </div>
+        {/* Category chip */}
+        <div style={{position:'absolute',top:12,left:12,
+          background:'rgba(0,0,0,.45)',backdropFilter:'blur(6px)',WebkitBackdropFilter:'blur(6px)',
+          border:'1px solid rgba(255,255,255,.15)',
+          color:'white',padding:'4px 10px',borderRadius:20,fontSize:11,fontWeight:500}}>
+          {cat?.emoji} {cat?.label}
+        </div>
+        {/* Name + location on photo */}
+        <div style={{position:'absolute',bottom:0,left:0,right:0,padding:'14px 16px'}}>
+          <div style={{fontFamily:C.serif,fontSize:20,fontWeight:600,color:'white',lineHeight:1.2,
+            overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',
+            textShadow:'0 1px 8px rgba(0,0,0,.5)'}}>
+            {place.name}
+          </div>
+          {place.location&&<div style={{fontSize:12,color:'rgba(255,255,255,.75)',marginTop:3,
+            overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            📍 {place.location}
+          </div>}
+        </div>
+      </div>
+      {/* Bottom strip */}
+      <div style={{padding:'12px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',background:C.surface}}>
+        <Stars value={place.priority||0} size={14}/>
+        <div style={{display:'flex',gap:5}}>
+          {place.travelStyles?.slice(0,2).map(sid=>{const s=STYLES.find(x=>x.id===sid);return s?<span key={sid} style={{fontSize:12,background:C.sand,color:C.warm,padding:'3px 8px',borderRadius:20,fontWeight:500}}>{s.emoji}</span>:null})}
+          {place.tags?.slice(0,2).map(t=><span key={t} style={{fontSize:11,background:'#FEF3E2',color:C.gold,padding:'3px 8px',borderRadius:20,fontWeight:500}}>#{t}</span>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Filter Pill ────────────────────────────────────────────────────────────────
+const Pill=({active,onClick,children})=>(
+  <button onClick={onClick} style={{
+    padding:'8px 16px',borderRadius:20,border:'none',cursor:'pointer',
+    background:active?C.header:'white',color:active?'white':C.warm,
+    fontWeight:active?600:400,fontSize:13,whiteSpace:'nowrap',
+    boxShadow:active?'0 2px 12px rgba(26,43,32,.25)':'0 1px 4px rgba(0,0,0,.08)',
+    transition:'all .2s',flexShrink:0,
+  }}>{children}</button>
+);
+
+// ── API Key Modal ─────────────────────────────────────────────────────────────
+function KeyModal({current,onSave,onClose}){
+  const [v,setV]=useState(current||'');
+  return(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,padding:20,backdropFilter:'blur(4px)'}} onClick={onClose}>
+      <div style={{background:'white',borderRadius:24,padding:28,width:'100%',maxWidth:400,boxShadow:'0 24px 64px rgba(0,0,0,.2)'}} onClick={e=>e.stopPropagation()}>
+        <div style={{fontFamily:C.serif,fontSize:24,fontWeight:700,color:C.text,marginBottom:6}}>API klíč</div>
+        <p style={{fontSize:13,color:C.muted,marginBottom:20,lineHeight:1.6}}>
+          Pro AI funkce (screenshot, odkaz) potřebuješ klíč z{' '}
+          <a href="https://console.anthropic.com" target="_blank" style={{color:C.gold,textDecoration:'none',fontWeight:600}}>console.anthropic.com</a>.
+          Uloží se pouze lokálně.
+        </p>
+        <SI type="password" value={v} onChange={e=>setV(e.target.value)} placeholder="sk-ant-api03-…"/>
+        <div style={{display:'flex',gap:10,marginTop:16}}>
+          <button onClick={onClose} style={{flex:1,padding:13,borderRadius:14,border:`1.5px solid ${C.border}`,background:'white',color:C.warm,fontWeight:600,fontSize:14,cursor:'pointer'}}>Zrušit</button>
+          <button onClick={()=>{onSave(v.trim());onClose()}} style={{flex:2,padding:13,borderRadius:14,border:'none',background:C.header,color:'white',fontWeight:700,fontSize:14,cursor:'pointer'}}>Uložit ✓</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Add / Edit Modal ──────────────────────────────────────────────────────────
+function FormModal({onClose,onAdd,onUpdate,apiKey,onNeedKey,editPlace}){
+  const isEdit=!!editPlace;
+  const blank={name:'',location:'',lat:null,lng:null,category:'other',travelStyles:[],tags:[],priority:3,notes:'',photo:null,status:'wishlist',description:''};
+  const [tab,setTab]=useState('manual');
+  const [form,setForm]=useState(isEdit?{...blank,...editPlace}:blank);
+  const [tagIn,setTagIn]=useState('');
+  const [ana,setAna]=useState(false);
+  const [geo,setGeo]=useState(false);
+  const [err,setErr]=useState('');
+  const [ok,setOk]=useState(false);
+  const [igUrl,setIgUrl]=useState('');
+  const fileRef=useRef(null);
+  const F=u=>setForm(p=>({...p,...u}));
+
+  const applyAI=(res,photo=null)=>{
+    if(!res?.name)return false;
+    F({name:res.name,location:res.location||'',lat:res.lat||null,lng:res.lng||null,
+      category:res.category||'other',description:res.description||'',
+      tags:res.tags?.length?res.tags:[],...(photo?{photo}:{})});
+    setOk(true);return true;
+  };
+
+  const chkKey=()=>{if(!apiKey){onNeedKey();return false}return true};
+
+  const handleImg=async e=>{
+    const file=e.target.files?.[0];if(!file)return;if(!chkKey())return;
+    setAna(true);setErr('');
+    try{
+      const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+      const rawPhoto=`data:${file.type};base64,${b64}`;
+      const photo=await compressPhoto(rawPhoto);
+      const res=await aiImg(b64,file.type,apiKey);
+      if(!applyAI(res,photo)){F({photo});setErr('Místo nerozpoznáno — vyplň ručně')}else setTab('manual');
+    }catch(e){setErr('Chyba: '+e.message)}finally{setAna(false)}
+  };
+
+  const handleUrl=async()=>{
+    if(!igUrl.trim()||!chkKey())return;
+    setAna(true);setErr('');
+    try{const r=await aiUrl(igUrl,apiKey);if(applyAI(r))setTab('manual');else setErr('Nepodařilo se získat info')}
+    catch(e){setErr('Chyba: '+e.message)}finally{setAna(false)}
+  };
+
+  const addTag=()=>{const t=tagIn.trim().replace(/^#/,'');if(t&&!form.tags.includes(t))F({tags:[...form.tags,t]});setTagIn('')};
+
+  const handleLocBlur=async e=>{
+    const loc=e.target.value.trim();
+    if(loc&&!form.lat){const c=await geocode(loc);if(c)F(c)}
+  };
+
+  const submit=async()=>{
+    if(!form.name.trim()){setErr('Zadej název');return}
+    let final={...form};
+    if(form.location.trim()&&!form.lat){setGeo(true);const c=await geocode(form.location);if(c)final={...final,...c};setGeo(false)}
+    isEdit?onUpdate(editPlace.id,final):onAdd(final);onClose();
+  };
+
+  const tabBtn=(id,lbl)=>(
+    <button onClick={()=>setTab(id)} style={{flex:1,padding:'9px 4px',borderRadius:10,border:'none',cursor:'pointer',
+      background:tab===id?'white':'transparent',color:tab===id?C.text:C.muted,
+      fontWeight:tab===id?600:400,fontSize:13,boxShadow:tab===id?'0 2px 8px rgba(0,0,0,.08)':'none',transition:'all .2s'}}>
+      {lbl}
+    </button>
+  );
+
+  return(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.6)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:1000,backdropFilter:'blur(4px)'}} onClick={onClose}>
+      <div style={{background:C.bg,width:'100%',maxWidth:560,borderRadius:'28px 28px 0 0',maxHeight:'94vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 -8px 40px rgba(0,0,0,.2)'}} onClick={e=>e.stopPropagation()}>
+
+        {/* Handle */}
+        <div style={{display:'flex',justifyContent:'center',padding:'12px 0 0'}}>
+          <div style={{width:40,height:4,borderRadius:2,background:C.border}}/>
+        </div>
+
+        {/* Header */}
+        <div style={{padding:'16px 24px 14px',borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:isEdit?0:14}}>
+            <div style={{fontFamily:C.serif,fontSize:24,fontWeight:700,color:C.text,fontStyle:'italic'}}>
+              {isEdit?'Upravit místo':'Nové místo'}
+            </div>
+            <button onClick={onClose} style={{background:C.sand,border:'none',borderRadius:'50%',width:32,height:32,cursor:'pointer',
+              fontSize:18,display:'flex',alignItems:'center',justifyContent:'center',color:C.warm}}>×</button>
+          </div>
+          {!isEdit&&(
+            <div style={{display:'flex',background:C.sand,borderRadius:14,padding:4,gap:4}}>
+              {tabBtn('manual','✏️ Ručně')}
+              {tabBtn('screenshot','📸 Screenshot')}
+              {tabBtn('link','🔗 Odkaz')}
+            </div>
+          )}
+        </div>
+
+        {/* Body */}
+        <div style={{flex:1,overflowY:'auto',padding:'20px 24px',display:'flex',flexDirection:'column',gap:18}}>
+          {err&&<div style={{background:'#FEF0EC',border:'1px solid #F5C4B4',color:'#B84020',borderRadius:14,padding:'12px 16px',fontSize:13}}>{err}</div>}
+          {ok&&tab==='manual'&&<div style={{background:'#EDF7F0',border:'1px solid #B4DFC4',color:'#1A5C38',borderRadius:14,padding:'12px 16px',fontSize:13}}>✓ Automaticky rozpoznáno — zkontroluj a uprav</div>}
+
+          {/* SCREENSHOT */}
+          {tab==='screenshot'&&!isEdit&&(
+            <div>
+              <input ref={fileRef} type="file" accept="image/*" onChange={handleImg} style={{display:'none'}}/>
+              <div onClick={()=>!ana&&fileRef.current?.click()} style={{
+                border:`2px dashed ${C.gold}`,borderRadius:24,padding:'52px 24px',textAlign:'center',
+                cursor:ana?'wait':'pointer',background:'#FEF8EE',transition:'all .2s'}}
+                onMouseEnter={e=>{if(!ana)e.currentTarget.style.background='#FEF0D8'}}
+                onMouseLeave={e=>e.currentTarget.style.background='#FEF8EE'}>
+                {ana?<>
+                  <div style={{fontSize:40,animation:'spin 1s linear infinite',marginBottom:12}}>⚙️</div>
+                  <div style={{color:C.gold,fontWeight:600,fontSize:16}}>AI analyzuje obrázek…</div>
+                  <div style={{color:C.muted,fontSize:13,marginTop:4}}>Chvíli strpení</div>
+                </>:<>
+                  <div style={{fontSize:56,marginBottom:14}}>📸</div>
+                  <div style={{fontFamily:C.serif,fontSize:22,fontWeight:600,color:C.text,fontStyle:'italic'}}>Nahraj screenshot</div>
+                  <div style={{color:C.muted,fontSize:13,marginTop:6,lineHeight:1.6}}>Z Instagramu, TikToku, Google Maps…<br/>AI automaticky rozpozná místo</div>
+                  <div style={{display:'inline-block',marginTop:14,background:C.gold,color:'white',padding:'8px 20px',borderRadius:20,fontSize:13,fontWeight:600}}>Vybrat soubor ✨</div>
+                </>}
+              </div>
+              {form.photo&&<div style={{marginTop:14}}>
+                <img src={form.photo} alt="" style={{width:'100%',height:140,objectFit:'cover',borderRadius:16}}/>
+                <button onClick={()=>setTab('manual')} style={{marginTop:10,color:C.gold,fontSize:13,background:'none',border:'none',cursor:'pointer',fontWeight:600}}>Přejít na formulář →</button>
+              </div>}
+            </div>
+          )}
+
+          {/* LINK */}
+          {tab==='link'&&!isEdit&&(
+            <div style={{display:'flex',flexDirection:'column',gap:14}}>
+              <SI label="Instagram, Google Maps nebo jiný odkaz" type="url" value={igUrl}
+                onChange={e=>setIgUrl(e.target.value)} placeholder="https://www.instagram.com/p/…"/>
+              <button onClick={handleUrl} disabled={ana||!igUrl.trim()} style={{
+                padding:15,borderRadius:16,border:'none',cursor:ana?'wait':'pointer',
+                background:ana||!igUrl.trim()?C.sand:`linear-gradient(135deg,${C.gold},#A86820)`,
+                color:ana||!igUrl.trim()?C.muted:'white',fontWeight:700,fontSize:15}}>
+                {ana?'⚙️ Analyzuji…':'🔍 Najít informace o místě'}
+              </button>
+              <div style={{fontSize:12,color:C.muted,textAlign:'center',lineHeight:1.5}}>
+                AI prohledá web a vyplní název, lokaci a kategorii místa
+              </div>
+            </div>
+          )}
+
+          {/* FORM */}
+          {(tab==='manual'||isEdit)&&(<>
+            {/* Photo */}
+            {form.photo
+              ?<div style={{position:'relative'}}>
+                <img src={form.photo==='__photo_removed__'?'':form.photo} alt="" style={{width:'100%',height:130,objectFit:'cover',borderRadius:18}}/>
+                <button onClick={()=>F({photo:null})} style={{position:'absolute',top:10,right:10,background:'rgba(0,0,0,.5)',color:'white',border:'none',borderRadius:'50%',width:28,height:28,cursor:'pointer',fontSize:15,display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+              </div>
+              :<><input ref={fileRef} type="file" accept="image/*" onChange={handleImg} style={{display:'none'}}/>
+                <button onClick={()=>fileRef.current?.click()} style={{
+                  border:`1.5px dashed ${C.border}`,borderRadius:16,padding:'14px',width:'100%',
+                  fontSize:13,color:C.muted,background:'white',cursor:'pointer',
+                  transition:'border-color .2s,color .2s'}}
+                  onMouseEnter={e=>{e.currentTarget.style.borderColor=C.gold;e.currentTarget.style.color=C.gold}}
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.color=C.muted}}>
+                  📷 Přidat foto nebo screenshot
+                </button></>}
+
+            <SI label="Název místa *" value={form.name} onChange={e=>F({name:e.target.value})} placeholder="La Pergola, Santorini, Šumava…"/>
+
+            {/* Location with geocode status */}
+            <div>
+              <Label>Lokace</Label>
+              <div style={{position:'relative'}}>
+                <input value={form.location} onChange={e=>F({location:e.target.value,lat:null,lng:null})}
+                  onBlur={handleLocBlur}
+                  placeholder="Město, Země — souřadnice se doplní automaticky"
+                  style={{width:'100%',background:C.surface,border:`1.5px solid ${form.lat?'#3A8A5A':C.border}`,borderRadius:14,
+                    padding:'12px 44px 12px 16px',fontSize:14,color:C.text,outline:'none',transition:'border-color .2s',boxSizing:'border-box'}}
+                  onFocus={e=>e.target.style.borderColor=C.gold}
+                  onBlur={e=>e.target.style.borderColor=form.lat?'#3A8A5A':C.border}/>
+                <span style={{position:'absolute',right:14,top:'50%',transform:'translateY(-50%)',fontSize:16}}>{form.lat?'✅':'📍'}</span>
+              </div>
+              {form.lat&&<div style={{fontSize:11,color:'#3A8A5A',marginTop:5,fontWeight:500}}>✓ Lokalizováno ({Number(form.lat).toFixed(3)}, {Number(form.lng).toFixed(3)})</div>}
+            </div>
+
+            {/* Category */}
+            <div>
+              <Label>Kategorie</Label>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8}}>
+                {CATS.map(cat=>(
+                  <button key={cat.id} onClick={()=>F({category:cat.id})} style={{
+                    display:'flex',flexDirection:'column',alignItems:'center',padding:'10px 4px',
+                    borderRadius:14,border:'none',cursor:'pointer',gap:5,transition:'all .15s',
+                    background:form.category===cat.id?cat.color:'white',
+                    boxShadow:form.category===cat.id?`0 4px 14px ${cat.color}55`:'0 1px 4px rgba(0,0,0,.07)',
+                    outline:form.category===cat.id?`2px solid ${cat.color}`:'none',
+                  }}>
+                    <span style={{fontSize:22}}>{cat.emoji}</span>
+                    <span style={{fontSize:9,color:form.category===cat.id?'rgba(255,255,255,.9)':C.muted,
+                      fontWeight:600,textAlign:'center',lineHeight:1.2,letterSpacing:'0.02em'}}>{cat.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Travel styles */}
+            <div>
+              <Label>S kým</Label>
+              <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+                {STYLES.map(s=>{const a=form.travelStyles.includes(s.id);return(
+                  <button key={s.id} onClick={()=>F({travelStyles:a?form.travelStyles.filter(x=>x!==s.id):[...form.travelStyles,s.id]})}
+                    style={{padding:'8px 16px',borderRadius:20,border:'none',cursor:'pointer',fontSize:13,transition:'all .15s',
+                      background:a?C.header:'white',color:a?'white':C.warm,fontWeight:a?600:400,
+                      boxShadow:a?'0 3px 12px rgba(26,43,32,.25)':'0 1px 4px rgba(0,0,0,.07)'}}>
+                    {s.emoji} {s.label}
+                  </button>
+                )})}
+              </div>
+            </div>
+
+            {/* Priority */}
+            <div>
+              <Label>Priorita</Label>
+              <Stars value={form.priority} onChange={p=>F({priority:p})} size={32} color={C.gold}/>
+            </div>
+
+            {/* Tags */}
+            <div>
+              <Label>Tagy</Label>
+              <div style={{display:'flex',gap:8}}>
+                <input value={tagIn} onChange={e=>setTagIn(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addTag()}}}
+                  placeholder="#výhled, #romantika…"
+                  style={{flex:1,background:'white',border:`1.5px solid ${C.border}`,borderRadius:12,padding:'11px 14px',fontSize:13,color:C.text,outline:'none'}}
+                  onFocus={e=>e.target.style.borderColor=C.gold} onBlur={e=>e.target.style.borderColor=C.border}/>
+                <button onClick={addTag} style={{background:'white',border:`1.5px solid ${C.border}`,borderRadius:12,padding:'11px 16px',cursor:'pointer',fontSize:18,color:C.warm}}>+</button>
+              </div>
+              {form.tags.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:8}}>
+                {form.tags.map(t=><span key={t} style={{background:'#FEF3E2',color:C.gold,padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:500,display:'flex',alignItems:'center',gap:6}}>
+                  #{t}
+                  <button onClick={()=>F({tags:form.tags.filter(x=>x!==t)})} style={{background:'none',border:'none',cursor:'pointer',color:C.gold,fontSize:14,padding:0,lineHeight:1}}>×</button>
+                </span>)}
+              </div>}
+            </div>
+
+            {/* Notes */}
+            <div>
+              <Label>Poznámky</Label>
+              <textarea value={form.notes} onChange={e=>F({notes:e.target.value})} placeholder="Proč tam chceš jít? Co tě zaujalo?" rows={3}
+                style={{width:'100%',background:'white',border:`1.5px solid ${C.border}`,borderRadius:14,padding:'12px 16px',fontSize:13,color:C.text,outline:'none',resize:'none',boxSizing:'border-box',lineHeight:1.6}}
+                onFocus={e=>e.target.style.borderColor=C.gold} onBlur={e=>e.target.style.borderColor=C.border}/>
+            </div>
+
+            {/* Status */}
+            <div>
+              <Label>Status</Label>
+              <div style={{display:'flex',gap:8}}>
+                {[{id:'wishlist',label:'♥ Chci jet',bg:C.gold},{id:'visited',label:'✓ Byl/a jsem',bg:C.forest}].map(o=>(
+                  <button key={o.id} onClick={()=>F({status:o.id})} style={{flex:1,padding:13,borderRadius:14,border:'none',cursor:'pointer',
+                    background:form.status===o.id?o.bg:'white',color:form.status===o.id?'white':C.warm,
+                    fontWeight:600,fontSize:14,transition:'all .2s',
+                    boxShadow:form.status===o.id?`0 4px 16px ${o.bg}55`:'0 1px 4px rgba(0,0,0,.07)'}}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>)}
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:'14px 24px 20px',borderTop:`1px solid ${C.border}`,display:'flex',gap:10,flexShrink:0,background:C.bg}}>
+          <button onClick={onClose} style={{flex:1,padding:14,borderRadius:16,border:`1.5px solid ${C.border}`,background:'white',color:C.warm,fontWeight:600,fontSize:15,cursor:'pointer'}}>Zrušit</button>
+          <button onClick={submit} disabled={!form.name.trim()||geo} style={{flex:2,padding:14,borderRadius:16,border:'none',
+            background:form.name.trim()&&!geo?C.header:C.sand,color:form.name.trim()&&!geo?'white':C.muted,
+            fontWeight:700,fontSize:15,cursor:form.name.trim()&&!geo?'pointer':'not-allowed',
+            boxShadow:form.name.trim()&&!geo?'0 4px 20px rgba(26,43,32,.3)':'none',transition:'all .2s'}}>
+            {geo?'📍 Lokalizuji…':isEdit?'Uložit změny ✓':'Přidat místo ✓'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Detail Modal ───────────────────────────────────────────────────────────────
+function Detail({place,onClose,onUpdate,onDelete,onEdit}){
+  const cat=CATS.find(c=>c.id===place.category);
+  const visited=place.status==='visited';
+  const [notes,setNotes]=useState(place.notes||'');
+  return(
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.65)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:1000,backdropFilter:'blur(4px)'}} onClick={onClose}>
+      <div style={{background:C.bg,width:'100%',maxWidth:560,borderRadius:'28px 28px 0 0',maxHeight:'92vh',overflow:'hidden',display:'flex',flexDirection:'column',boxShadow:'0 -8px 40px rgba(0,0,0,.2)'}} onClick={e=>e.stopPropagation()}>
+        {/* Hero */}
+        <div style={{position:'relative',height:260,background:cat?.color||C.header,flexShrink:0,overflow:'hidden'}}>
+          {place.photo&&place.photo!=='__photo_removed__'?<img src={place.photo} alt={place.name} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+            :<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%'}}><span style={{fontSize:80}}>{cat?.emoji||'📍'}</span></div>}
+          <div style={{position:'absolute',inset:0,background:'linear-gradient(to top,rgba(0,0,0,.7) 0%,rgba(0,0,0,.1) 60%)'}}/>
+          <button onClick={onClose} style={{position:'absolute',top:16,right:16,background:'rgba(0,0,0,.4)',backdropFilter:'blur(6px)',
+            color:'white',border:'none',borderRadius:'50%',width:38,height:38,cursor:'pointer',fontSize:20,
+            display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+          <button onClick={onEdit} style={{position:'absolute',top:16,right:64,background:'rgba(255,255,255,.15)',backdropFilter:'blur(6px)',
+            color:'white',border:'1px solid rgba(255,255,255,.3)',borderRadius:20,padding:'7px 14px',
+            cursor:'pointer',fontSize:13,fontWeight:600}}>✏️ Upravit</button>
+          <div style={{position:'absolute',bottom:0,left:0,right:0,padding:'0 22px 20px'}}>
+            <div style={{fontFamily:C.serif,fontSize:28,fontWeight:700,color:'white',fontStyle:'italic',lineHeight:1.2,marginBottom:4,textShadow:'0 2px 8px rgba(0,0,0,.4)'}}>{place.name}</div>
+            {place.location&&<div style={{color:'rgba(255,255,255,.75)',fontSize:13}}>📍 {place.location}{!place.lat&&<span style={{color:'rgba(255,200,100,.8)',marginLeft:6}}>· není na mapě</span>}</div>}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div style={{flex:1,overflowY:'auto',padding:'22px 24px',display:'flex',flexDirection:'column',gap:16}}>
+          <div style={{display:'flex',alignItems:'center',gap:16}}>
+            <Stars value={place.priority||0} onChange={p=>onUpdate({priority:p})} size={26} color={C.gold}/>
+            <div style={{width:1,height:24,background:C.border}}/>
+            <span style={{fontSize:20}}>{cat?.emoji}</span>
+            <span style={{color:C.warm,fontSize:14,fontWeight:500}}>{cat?.label}</span>
+            <div style={{marginLeft:'auto',background:visited?C.forest:C.gold,color:'white',padding:'5px 14px',borderRadius:20,fontSize:12,fontWeight:600}}>
+              {visited?'✓ Navštíveno':'♥ Wishlist'}
+            </div>
+          </div>
+
+          {place.travelStyles?.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+            {place.travelStyles.map(sid=>{const s=STYLES.find(x=>x.id===sid);return s?<span key={sid} style={{background:'white',border:`1px solid ${C.border}`,color:C.warm,padding:'6px 14px',borderRadius:20,fontSize:13,fontWeight:500}}>{s.emoji} {s.label}</span>:null})}
+          </div>}
+
+          {place.description&&<div style={{background:'white',borderRadius:18,padding:'16px 18px',fontSize:14,color:'#4A4540',lineHeight:1.7,border:`1px solid ${C.border}`,fontStyle:'italic'}}>{place.description}</div>}
+
+          {place.tags?.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:7}}>
+            {place.tags.map(t=><span key={t} style={{background:'#FEF3E2',color:C.gold,padding:'6px 14px',borderRadius:20,fontSize:13,fontWeight:500}}>#{t}</span>)}
+          </div>}
+
+          <div>
+            <Label>Poznámky</Label>
+            <textarea value={notes} onChange={e=>setNotes(e.target.value)} rows={3}
+              onBlur={()=>onUpdate({notes})} placeholder="Přidej poznámky…"
+              style={{width:'100%',background:'white',border:`1.5px solid ${C.border}`,borderRadius:16,padding:'13px 16px',fontSize:13,color:C.text,outline:'none',resize:'none',boxSizing:'border-box',lineHeight:1.6}}
+              onFocus={e=>e.target.style.borderColor=C.gold} onBlur={e=>{e.target.style.borderColor=C.border;onUpdate({notes})}}/>
+          </div>
+
+          <button onClick={()=>onUpdate({status:visited?'wishlist':'visited'})} style={{
+            width:'100%',padding:15,borderRadius:16,border:'none',cursor:'pointer',fontSize:15,fontWeight:600,
+            background:visited?'white':C.forest,color:visited?C.warm:'white',
+            border:visited?`1.5px solid ${C.border}`:'none',
+            boxShadow:visited?'none':'0 4px 20px rgba(42,74,56,.3)',transition:'all .2s'}}>
+            {visited?'↩ Přesunout zpět do wishlistu':'✓ Označit jako navštíveno'}
+          </button>
+
+          <button onClick={onDelete} style={{background:'none',border:'none',color:'#C05050',fontSize:14,cursor:'pointer',padding:'2px 0',fontWeight:500}}>🗑️ Smazat toto místo</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App(){
+  const [places,setPlaces]=useState([]);
+  const [view,setView]=useState('grid');
+  const [statusF,setStatusF]=useState('all');
+  const [catF,setCatF]=useState('all');
+  const [styleF,setStyleF]=useState('all');
+  const [search,setSearch]=useState('');
+  const [showAdd,setShowAdd]=useState(false);
+  const [editPlace,setEditPlace]=useState(null);
+  const [detail,setDetail]=useState(null);
+  const [loaded,setLoaded]=useState(false);
+  const [apiKey,setApiKey]=useState('');
+  const [showKey,setShowKey]=useState(false);
+
+  useEffect(()=>{
+    dbLoad().then(p=>{ setPlaces(p); });
+    setApiKey(localStorage.getItem('twl_apikey')||'');
+    setLoaded(true);
+  },[]);
+
+  const save=next=>{ setPlaces(next); dbSave(next); };
+  const addP=f=>save([{...f,id:String(Date.now()),createdAt:new Date().toISOString()},...places]);
+  const updP=(id,u)=>{save(places.map(p=>p.id===id?{...p,...u}:p));if(detail?.id===id)setDetail(prev=>({...prev,...u}))};
+  const delP=id=>{save(places.filter(p=>p.id!==id));setDetail(null)};
+  const saveKey=k=>{setApiKey(k);localStorage.setItem('twl_apikey',k)};
+
+  const openEdit=place=>{setDetail(null);setEditPlace(place)};
+  const saveEdit=(id,f)=>{updP(id,f);setEditPlace(null)};
+
+  const filtered=places.filter(p=>{
+    if(statusF!=='all'&&p.status!==statusF)return false;
+    if(catF!=='all'&&p.category!==catF)return false;
+    if(styleF!=='all'&&!p.travelStyles?.includes(styleF))return false;
+    if(search){const q=search.toLowerCase();
+      if(!p.name?.toLowerCase().includes(q)&&!p.location?.toLowerCase().includes(q)&&!p.tags?.some(t=>t.toLowerCase().includes(q)))return false}
+    return true;
+  });
+
+  const wc=places.filter(p=>p.status==='wishlist').length;
+  const vc=places.filter(p=>p.status==='visited').length;
+
+  if(!loaded)return<div style={{height:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:C.bg,color:C.muted,fontSize:14}}>Načítám…</div>;
+
+  return(
+    <div style={{minHeight:'100vh',background:C.bg}}>
+
+      {/* ── HEADER ─────────────────────────────────────────── */}
+      <header style={{background:C.header,position:'sticky',top:0,zIndex:100,boxShadow:'0 4px 24px rgba(0,0,0,.2)'}}>
+        <div style={{maxWidth:1140,margin:'0 auto',padding:'0 20px'}}>
+          {/* Top row */}
+          <div style={{display:'flex',alignItems:'center',gap:12,padding:'16px 0 14px',borderBottom:'1px solid rgba(255,255,255,.1)'}}>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:C.serif,fontSize:26,fontWeight:600,color:'white',fontStyle:'italic',lineHeight:1,letterSpacing:'-0.3px'}}>
+                Travel Wishlist
+              </div>
+              <div style={{color:'rgba(255,255,255,.5)',fontSize:11,marginTop:3,letterSpacing:'0.06em',textTransform:'uppercase'}}>
+                {wc} míst na mapě · {vc} navštíveno
+              </div>
+            </div>
+            {/* View toggle */}
+            <div style={{display:'flex',background:'rgba(255,255,255,.1)',borderRadius:12,padding:3,gap:3}}>
+              {[{id:'grid',l:'⊞ Karty'},{id:'map',l:'🗺 Mapa'}].map(v=>(
+                <button key={v.id} onClick={()=>setView(v.id)} style={{padding:'7px 13px',borderRadius:10,border:'none',cursor:'pointer',
+                  background:view===v.id?'rgba(255,255,255,.2)':'transparent',color:'rgba(255,255,255,.8)',
+                  fontWeight:view===v.id?600:400,fontSize:12,transition:'all .2s'}}>
+                  {v.l}
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setShowKey(true)} style={{background:'rgba(255,255,255,.1)',border:'none',borderRadius:10,padding:'8px 10px',cursor:'pointer',fontSize:15,color:apiKey?'#7EC88A':'rgba(255,255,255,.6)'}}>
+              {apiKey?'🔑':'⚙️'}
+            </button>
+          </div>
+          {/* Search */}
+          <div style={{padding:'12px 0 14px',position:'relative'}}>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Hledat místo, destinaci, tag…"
+              style={{width:'100%',background:'rgba(255,255,255,.1)',border:'1px solid rgba(255,255,255,.15)',borderRadius:14,
+                padding:'11px 16px 11px 42px',fontSize:14,color:'white',outline:'none',boxSizing:'border-box',
+                letterSpacing:'0.01em'}}
+              onFocus={e=>e.target.style.background='rgba(255,255,255,.15)'}
+              onBlur={e=>e.target.style.background='rgba(255,255,255,.1)'}/>
+            <span style={{position:'absolute',left:14,top:'50%',transform:'translateY(-50%)',fontSize:16,color:'rgba(255,255,255,.4)'}}>🔍</span>
+            {search&&<button onClick={()=>setSearch('')} style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',background:'none',border:'none',color:'rgba(255,255,255,.5)',cursor:'pointer',fontSize:18}}>×</button>}
+          </div>
+        </div>
+      </header>
+
+      {/* ── FILTERS (pill chips) ────────────────────────────── */}
+      <div style={{background:'white',borderBottom:`1px solid ${C.border}`,position:'sticky',top:108,zIndex:99,boxShadow:'0 2px 12px rgba(0,0,0,.05)'}}>
+        <div style={{maxWidth:1140,margin:'0 auto',padding:'10px 20px',display:'flex',gap:8,overflowX:'auto',alignItems:'center',WebkitOverflowScrolling:'touch'}}>
+          {/* Status */}
+          <Pill active={statusF==='all'} onClick={()=>setStatusF('all')}>Vše</Pill>
+          <Pill active={statusF==='wishlist'} onClick={()=>setStatusF(statusF==='wishlist'?'all':'wishlist')}>♥ Wishlist</Pill>
+          <Pill active={statusF==='visited'} onClick={()=>setStatusF(statusF==='visited'?'all':'visited')}>✓ Navštíveno</Pill>
+          <div style={{width:1,height:20,background:C.border,flexShrink:0}}/>
+          {/* Categories */}
+          {CATS.map(cat=>(
+            <Pill key={cat.id} active={catF===cat.id} onClick={()=>setCatF(catF===cat.id?'all':cat.id)}>
+              {cat.emoji} {cat.label}
+            </Pill>
+          ))}
+          <div style={{width:1,height:20,background:C.border,flexShrink:0}}/>
+          {/* Styles */}
+          {STYLES.map(s=>(
+            <Pill key={s.id} active={styleF===s.id} onClick={()=>setStyleF(styleF===s.id?'all':s.id)}>
+              {s.emoji} {s.label}
+            </Pill>
+          ))}
+        </div>
+      </div>
+
+      {/* ── MAIN ───────────────────────────────────────────── */}
+      <main style={{maxWidth:1140,margin:'0 auto',padding:'24px 20px 100px'}}>
+        {view==='map'
+          ?<MapView places={filtered} onSelect={setDetail}/>
+          :filtered.length===0
+            ?<div style={{textAlign:'center',padding:'100px 20px',color:C.muted}}>
+              {places.length===0?<>
+                <div style={{fontSize:72,marginBottom:20}}>🌍</div>
+                <div style={{fontFamily:C.serif,fontSize:28,fontStyle:'italic',color:C.text,marginBottom:10}}>Tvůj wishlist čeká</div>
+                <div style={{fontSize:14,lineHeight:1.7,marginBottom:30,color:C.muted}}>Přidej první místo ručně, nahraj screenshot<br/>z Instagramu, nebo vlož odkaz</div>
+                <button onClick={()=>setShowAdd(true)} style={{background:C.header,color:'white',border:'none',borderRadius:16,
+                  padding:'14px 28px',fontSize:15,fontWeight:700,cursor:'pointer',
+                  boxShadow:'0 8px 24px rgba(26,43,32,.35)'}}>+ Přidat první místo</button>
+              </>:<>
+                <div style={{fontSize:52,marginBottom:14}}>🔍</div>
+                <div style={{fontSize:17,color:C.text,fontWeight:500}}>Žádná místa</div>
+                <div style={{fontSize:13,marginTop:6}}>Zkus jiný filtr nebo vyhledávání</div>
+              </>}
+            </div>
+            :<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(240px,1fr))',gap:20}}>
+              {filtered.map(p=><Card key={p.id} place={p} onSelect={setDetail}/>)}
+            </div>}
+      </main>
+
+      {/* ── FAB (floating action button) ──────────────────── */}
+      <button onClick={()=>setShowAdd(true)} style={{
+        position:'fixed',bottom:28,right:24,width:60,height:60,borderRadius:'50%',border:'none',
+        background:`linear-gradient(135deg,${C.gold},#A86820)`,color:'white',fontSize:28,cursor:'pointer',
+        boxShadow:'0 8px 28px rgba(200,134,42,.55)',zIndex:90,display:'flex',alignItems:'center',justifyContent:'center',
+        transition:'transform .2s,box-shadow .2s'}}
+        onMouseEnter={e=>{e.currentTarget.style.transform='scale(1.1)';e.currentTarget.style.boxShadow='0 12px 36px rgba(200,134,42,.65)'}}
+        onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow='0 8px 28px rgba(200,134,42,.55)'}}>
+        +
+      </button>
+
+      {/* ── Modals ─────────────────────────────────────────── */}
+      {showAdd&&<FormModal onClose={()=>setShowAdd(false)} onAdd={addP} onUpdate={()=>{}} apiKey={apiKey} onNeedKey={()=>setShowKey(true)}/>}
+      {editPlace&&<FormModal onClose={()=>setEditPlace(null)} onAdd={()=>{}} onUpdate={saveEdit} apiKey={apiKey} onNeedKey={()=>setShowKey(true)} editPlace={editPlace}/>}
+      {detail&&<Detail place={detail} onClose={()=>setDetail(null)} onUpdate={u=>updP(detail.id,u)} onDelete={()=>delP(detail.id)} onEdit={()=>openEdit(detail)}/>}
+      {showKey&&<KeyModal current={apiKey} onSave={saveKey} onClose={()=>setShowKey(false)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+
+<script>
+// ── PWA install ───────────────────────────────────────────────────────────────
+(function(){
+  if (!('serviceWorker' in navigator)) return;
+
+  navigator.serviceWorker.register('./sw.js')
+    .then(reg => {
+      console.log('[PWA] SW registered:', reg.scope);
+    })
+    .catch(err => console.warn('[PWA] SW failed:', err));
+
+  let deferredPrompt = null;
+
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    deferredPrompt = e;
+    if (!localStorage.getItem('twl_installed')) {
+      setTimeout(() => showBanner(e), 2000);
+    }
+  });
+
+  window.addEventListener('appinstalled', () => {
+    localStorage.setItem('twl_installed', '1');
+    const b = document.getElementById('twl-banner');
+    if (b) b.remove();
+  });
+
+  function showBanner(prompt) {
+    if (document.getElementById('twl-banner')) return;
+    const el = document.createElement('div');
+    el.id = 'twl-banner';
+    el.style.cssText = [
+      'position:fixed','bottom:100px','left:16px','right:16px','z-index:9999',
+      'background:#1A2B20','color:white','border-radius:20px','padding:14px 18px',
+      'display:flex','align-items:center','gap:12px',
+      'box-shadow:0 8px 32px rgba(0,0,0,.4)',
+      'animation:fadeUp .35s ease','font-family:Inter,sans-serif',
+    ].join(';');
+    el.innerHTML = `
+      <span style="font-size:26px">🗺️</span>
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:14px">Přidat na plochu</div>
+        <div style="font-size:12px;opacity:.65;margin-top:2px">Nainstalovat jako appku</div>
+      </div>
+      <button id="twl-install" style="background:#C8862A;color:white;border:none;border-radius:12px;
+        padding:9px 16px;font-weight:700;font-size:13px;cursor:pointer;font-family:Inter,sans-serif">
+        Přidat
+      </button>
+      <button id="twl-dismiss" style="background:rgba(255,255,255,.15);color:white;border:none;
+        border-radius:10px;padding:9px 12px;font-size:18px;cursor:pointer;line-height:1">×</button>
+    `;
+    document.body.appendChild(el);
+    document.getElementById('twl-install').onclick = async () => {
+      prompt.prompt();
+      const { outcome } = await prompt.userChoice;
+      if (outcome === 'accepted') localStorage.setItem('twl_installed', '1');
+      el.remove();
+    };
+    document.getElementById('twl-dismiss').onclick = () => {
+      el.remove();
+      localStorage.setItem('twl_installed', '1');
+    };
+  }
+})();
+</script>
+</body>
+</html>
